@@ -10,6 +10,7 @@ st.markdown("""
 Sube la nómina de rechazos. El sistema detectará automáticamente:
 * **Empresa vs Persona:** Basado en si el RUT base es > 70.000.000.
 * **Error de Tarjeta:** Si el número de cuenta tiene 15 o más dígitos.
+* **Caso Especial:** Detecta 'Medio de pago habilitado en banco destino' y ajusta el mensaje.
 """)
 
 # --- BARRA LATERAL (INPUTS DEL AGENTE) ---
@@ -20,47 +21,28 @@ pie_firma = st.sidebar.text_input("Tu Firma / Cargo", value="Cabify Support")
 # --- FUNCIONES DE LÓGICA ---
 
 def limpiar_rut(rut_raw):
-    """
-    Recibe un RUT (ej: '76.123.456-K' o '15469746-2') y devuelve el número base entero.
-    """
     try:
         rut_str = str(rut_raw).upper()
-        # Quitamos puntos y guión
         rut_limpio = rut_str.replace(".", "").replace("-", "")
-        # Quitamos el dígito verificador (el último caracter)
         cuerpo_rut = rut_limpio[:-1]
-        
-        # Convertimos a entero para comparar
         return int(cuerpo_rut)
     except:
-        return 0 # Si falla, retornamos 0
+        return 0
 
 def procesar_saludo(row):
-    """
-    Define el saludo basado en el RUT.
-    RUT > 70.000.000 -> Empresa (Usa razón social completa).
-    RUT < 70.000.000 -> Persona (Usa primer nombre).
-    """
     rut_val = limpiar_rut(row.get('Rut', 0))
     nombre_completo = str(row.get('Nombre / Razón social', 'Colaborador')).strip()
     
     if rut_val > 70000000:
-        # Es Empresa
         return nombre_completo.title()
     else:
-        # Es Persona Natural
         partes = nombre_completo.split()
         if len(partes) > 0:
             return partes[0].capitalize()
         return "Colaborador"
 
 def formatear_cuenta(cuenta_raw):
-    """
-    Maneja números que vienen como flotantes o notación científica (ej: 5.33E+15).
-    Devuelve un string limpio.
-    """
     try:
-        # Si es un número (float o int), lo convertimos a string sin decimales .0
         if isinstance(cuenta_raw, (float, int)):
             return "{:.0f}".format(cuenta_raw)
         return str(cuenta_raw)
@@ -68,37 +50,54 @@ def formatear_cuenta(cuenta_raw):
         return str(cuenta_raw)
 
 def generar_aviso_tarjeta(cuenta_str):
-    """
-    Verifica longitud de la cuenta ya convertida a string.
-    """
-    # Limpiamos espacios por seguridad
     cuenta_clean = cuenta_str.replace(" ", "")
     if len(cuenta_clean) >= 15:
         return "\n⚠️ **Nota Importante:** Hemos notado que el número registrado tiene 15 o más dígitos. Te recordamos cordialmente verificar que estés ingresando tu **número de cuenta bancaria** y no el número que aparece impreso en tu tarjeta (plástico), ya que suelen ser diferentes.\n"
     return ""
 
 def crear_texto_correo(row, agente, firma):
+    # 1. Datos básicos
     nombre_saludo = procesar_saludo(row)
-    motivo = row.get('Motivo del rechazo', 'Motivo no especificado')
+    motivo_original = str(row.get('Motivo del rechazo', 'Motivo no especificado'))
     institucion = row.get('Institución', 'Banco no especificado')
-    
-    # Formatear la cuenta para evitar el "5.33e+15"
     cuenta_str = formatear_cuenta(row.get('Cuenta', 'N/A'))
-    
     aviso_tarjeta = generar_aviso_tarjeta(cuenta_str)
-    
+
+    # 2. Lógica del Caso Especial (Incidencia Operativa)
+    es_caso_especial = "Medio de pago habilitado en banco destino" in motivo_original
+
+    if es_caso_especial:
+        # Reemplazo del motivo técnico por el amigable
+        motivo_mostrar = "La transferencia no pudo realizarse debido a una incidencia operativa del banco receptor."
+        
+        # Mensaje condicional: Da la opción de mantener o cambiar
+        bloque_accion = """Dada esta situación, queda a tu elección cómo proceder para el próximo pago:
+
+1. **Mantener tu cuenta actual:** Si confirmas que tu cuenta está operativa, podemos reintentar el abono en el siguiente ciclo, aunque depende de tu banco si lo acepta.
+2. **Cambiar de cuenta:** Para asegurar el pago más rápido, puedes indicarnos una cuenta diferente (de otro banco o tipo).
+
+**Si decides cambiarla**, por favor respóndenos con los siguientes datos:"""
+
+    else:
+        # Caso Normal
+        motivo_mostrar = motivo_original
+        
+        # Mensaje estándar: Pide verificar o cambiar
+        bloque_accion = """Para poder continuar con los abonos pendientes, te pedimos por favor verificar si esta información es correcta o bien ingresar una nueva cuenta bancaria con los siguientes datos:"""
+
+    # 3. Construcción del Mensaje Final
     mensaje = f"""Hola {nombre_saludo},
 
 Mi nombre es {agente} y seré el encargado de ayudarte con tu caso.
 
 Junto con saludarte, te comento que tus pagos han sido rechazados por tu banco debido al siguiente motivo:
-Motivo de rechazo: {motivo}
+Motivo de rechazo: {motivo_mostrar}
 
 Cuenta registrada al momento del rechazo:
 Institución: {institucion}
 N° de cuenta: {cuenta_str}
 {aviso_tarjeta}
-Para poder continuar con los abonos pendientes, te pedimos por favor verificar si esta información es correcta o bien ingresar una nueva cuenta bancaria con los siguientes datos:
+{bloque_accion}
 
 Nombre:
 RUT:
@@ -126,36 +125,28 @@ uploaded_file = st.file_uploader("Sube tu archivo (Excel o CSV)", type=["xlsx", 
 
 if uploaded_file is not None:
     try:
-        # Detectar si es CSV o Excel por la extensión
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
             
-        # Normalizar nombres de columnas (eliminar espacios extra al inicio/final por seguridad)
         df.columns = df.columns.str.strip()
         
-        # Verificar columnas críticas del archivo que enviaste
         cols_requeridas = ['Rut', 'Nombre / Razón social', 'Institución', 'Cuenta', 'email']
-        
-        # Filtrar solo si faltan columnas
         missing = [c for c in cols_requeridas if c not in df.columns]
         
         if missing:
-            st.error(f"Faltan las siguientes columnas en tu archivo: {', '.join(missing)}")
-            st.info("Asegúrate de que los encabezados sean: 'Rut', 'Nombre / Razón social', 'Institución', 'Cuenta', 'email'")
+            st.error(f"Faltan las siguientes columnas: {', '.join(missing)}")
         else:
-            st.success(f"Archivo cargado con {len(df)} registros. Mostrando vista para Zendesk:")
+            st.success(f"Archivo cargado. Generando respuestas...")
             
-            # Iterar sobre cada fila para mostrar el bloque de copia
             for index, row in df.iterrows():
                 email_usuario = row['email']
                 if pd.isna(email_usuario):
-                    email_usuario = "Correo no disponible en tabla"
+                    email_usuario = "Correo no disponible"
                 
                 texto_final = crear_texto_correo(row, nombre_agente, pie_firma)
                 
-                # Diseño de "Tarjeta" para cada caso
                 with st.container():
                     st.markdown("---")
                     col1, col2 = st.columns([1, 3])
@@ -163,17 +154,19 @@ if uploaded_file is not None:
                     with col1:
                         st.subheader(f"Caso #{index + 1}")
                         st.info(f"📧 **Enviar a:**\n\n{email_usuario}")
-                        
-                        # Mostrar datos clave para referencia rápida del agente
                         st.text(f"RUT: {row['Rut']}")
+                        
+                        # Alerta visual para el agente si es el caso especial
+                        motivo_check = str(row.get('Motivo del rechazo', ''))
+                        if "Medio de pago habilitado en banco destino" in motivo_check:
+                            st.error("⚡ Caso Especial: Incidencia Banco")
+                        
                         cuenta_display = formatear_cuenta(row['Cuenta'])
-                        st.caption(f"Cuenta: {cuenta_display}")
                         if len(cuenta_display) >= 15:
-                            st.warning("⚠️ Detectado posible N° Tarjeta")
+                            st.warning("⚠️ Posible N° Tarjeta")
                     
                     with col2:
-                        st.write("**Copiar el siguiente mensaje:**")
-                        # st.code genera un bloque con botón de copiado automático
+                        st.write("**Copiar mensaje:**")
                         st.code(texto_final, language="markdown")
 
     except Exception as e:
