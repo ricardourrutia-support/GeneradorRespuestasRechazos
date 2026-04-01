@@ -10,7 +10,7 @@ st.markdown("""
 Sube la nómina de rechazos. El sistema detectará automáticamente:
 * **Empresa vs Persona:** Basado en si el RUT base es > 70.000.000.
 * **Error de Tarjeta:** Si el número de cuenta tiene 15 o más dígitos.
-* **Caso Especial:** Detecta 'Medio de pago habilitado en banco destino' y ajusta el mensaje.
+* **Casos Especiales:** Detecta errores técnicos (ej: 'Host IFR no disponible') y ajusta el mensaje de forma amigable.
 """)
 
 # --- BARRA LATERAL (INPUTS DEL AGENTE) ---
@@ -63,10 +63,11 @@ def crear_texto_correo(row, agente, firma):
     cuenta_str = formatear_cuenta(row.get('Cuenta', 'N/A'))
     aviso_tarjeta = generar_aviso_tarjeta(cuenta_str)
 
-    # 2. Lógica del Caso Especial (Incidencia Operativa)
-    es_caso_especial = "Medio de pago habilitado en banco destino" in motivo_original
+    # 2. Lógica de Casos Especiales
+    es_caso_operativo = "Medio de pago habilitado en banco destino" in motivo_original
+    es_caso_ifr = "Host IFR no disponible" in motivo_original
 
-    if es_caso_especial:
+    if es_caso_operativo:
         # Reemplazo del motivo técnico por el amigable
         motivo_mostrar = "La transferencia no pudo realizarse debido a una incidencia operativa del banco receptor."
         
@@ -77,6 +78,13 @@ def crear_texto_correo(row, agente, firma):
 2. **Cambiar de cuenta:** Para asegurar el pago más rápido, puedes indicarnos una cuenta diferente (de otro banco o tipo).
 
 **Si decides cambiarla**, por favor respóndenos con los siguientes datos:"""
+
+    elif es_caso_ifr:
+        # Reemplazo del motivo IFR por intermitencia
+        motivo_mostrar = f"Intermitencias en el Banco {institucion} al momento de procesar el pago."
+        
+        # Mensaje estándar
+        bloque_accion = """Para poder continuar con los abonos pendientes, te pedimos por favor verificar si esta información es correcta o bien ingresar una nueva cuenta bancaria con los siguientes datos:"""
 
     else:
         # Caso Normal
@@ -156,10 +164,12 @@ if uploaded_file is not None:
                         st.info(f"📧 **Enviar a:**\n\n{email_usuario}")
                         st.text(f"RUT: {row['Rut']}")
                         
-                        # Alerta visual para el agente si es el caso especial
+                        # Alertas visuales para el agente
                         motivo_check = str(row.get('Motivo del rechazo', ''))
                         if "Medio de pago habilitado en banco destino" in motivo_check:
                             st.error("⚡ Caso Especial: Incidencia Banco")
+                        elif "Host IFR no disponible" in motivo_check:
+                            st.warning("🔄 Caso Especial: Intermitencia (IFR)")
                         
                         cuenta_display = formatear_cuenta(row['Cuenta'])
                         if len(cuenta_display) >= 15:
